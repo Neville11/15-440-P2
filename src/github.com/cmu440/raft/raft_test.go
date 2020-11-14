@@ -81,7 +81,7 @@ func TestLargePartition2A(t *testing.T) {
 	fmt.Printf("Basic 1 leader\n")
 
 	leader1 := cfg.checkOneLeader()
-	fmt.Printf("Gotten leader was %v\n", leader1)
+	fmt.Printf("Gotten leader was %v\n\n\n", leader1)
 
 	fmt.Printf("forming partition with leader and 3 nodes\n")
 	partition := make(IntSet)
@@ -106,7 +106,7 @@ func TestLargePartition2A(t *testing.T) {
 
 	fmt.Printf("checking for previous leader in partition2\n")
 	oldLeader := cfg.checkLeaderInPartition(partition)
-	fmt.Printf("old leader was %v\n", oldLeader)
+	fmt.Printf("old leader was %v\n\n\n", oldLeader)
 
 	fmt.Printf("reconnecting partition2\n")
 	cfg.connect_partition(partition)
@@ -115,7 +115,7 @@ func TestLargePartition2A(t *testing.T) {
 
 	fmt.Printf("checking for leader\n")
 	latestLeader := cfg.checkOneLeader()
-	fmt.Printf("latest leader was %v\n", latestLeader)
+	fmt.Printf("latest leader was %v\n\n\n", latestLeader)
 
 	fmt.Printf("======================= END =======================\n\n")
 }
