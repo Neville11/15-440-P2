@@ -1,15 +1,19 @@
 package raft
 
-import "github.com/cmu440/rpc"
-import "log"
-import "sync"
-import "testing"
-import "runtime"
-import crand "crypto/rand"
-import "encoding/base64"
-import "sync/atomic"
-import "time"
-import "fmt"
+import (
+	"log"
+	"runtime"
+	"sync"
+	"testing"
+
+	"github.com/cmu440/rpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"sync/atomic"
+	"time"
+)
 
 //
 // Raft tests.
@@ -35,7 +39,9 @@ func TestInitialElection2A(t *testing.T) {
 
 	// is a leader elected?
 	fmt.Printf("Checking current leader\n")
-	cfg.checkOneLeader()
+	leader := cfg.checkOneLeader()
+
+	fmt.Printf("gotten leader was %v\n", leader)
 
 	fmt.Printf("======================= END =======================\n\n")
 }
@@ -50,13 +56,66 @@ func TestReElection2A(t *testing.T) {
 	fmt.Printf("Basic 1 leader\n")
 	leader1 := cfg.checkOneLeader()
 
+	fmt.Printf("Gotten leader was %v\n", leader1)
+
 	// if the leader disconnects, a new one should be elected.
 	fmt.Printf("Disconnecting leader\n")
 	cfg.disconnect(leader1)
 
 	// a new leader should be elected
 	fmt.Printf("Checking for a new leader\n")
-	cfg.checkOneLeader()
+	leader2 := cfg.checkOneLeader()
+
+	fmt.Printf("New leader was %v\n", leader2)
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+func TestLargePartition2A(t *testing.T) {
+	fmt.Printf("==================== 11 SERVERS ====================\n")
+	servers := 11
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2A): partitioned leaders with consensus\n")
+	fmt.Printf("Basic 1 leader\n")
+
+	leader1 := cfg.checkOneLeader()
+	fmt.Printf("Gotten leader was %v\n", leader1)
+
+	fmt.Printf("forming partition with leader and 3 nodes\n")
+	partition := make(IntSet)
+	partition[leader1] = struct{}{}
+	fmt.Printf("%v added to partition\n", leader1)
+
+	for i := 0; i < cfg.n; i++ {
+		if len(partition) == 4 {
+			break
+		}
+		if i != leader1 {
+			partition[i] = struct{}{}
+			fmt.Printf("%v added to partition\n", i)
+		}
+	}
+
+	cfg.disconnect_partition(partition)
+
+	fmt.Printf("checking for new leader in original partition\n")
+	newLeader := cfg.checkOneLeader()
+	fmt.Printf("new leader was %v\n", newLeader)
+
+	fmt.Printf("checking for previous leader in partition2\n")
+	oldLeader := cfg.checkLeaderInPartition(partition)
+	fmt.Printf("old leader was %v\n", oldLeader)
+
+	fmt.Printf("reconnecting partition2\n")
+	cfg.connect_partition(partition)
+	fmt.Printf("Waiting for a bit \n")
+	time.Sleep(time.Millisecond * 500)
+
+	fmt.Printf("checking for leader\n")
+	latestLeader := cfg.checkOneLeader()
+	fmt.Printf("latest leader was %v\n", latestLeader)
 
 	fmt.Printf("======================= END =======================\n\n")
 }
