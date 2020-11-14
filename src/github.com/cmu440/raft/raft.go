@@ -20,10 +20,6 @@ package raft
 // rf.PutCommand(command interface{}) (index, term, isleader)
 //   PutCommand agreement on a new log entry
 //
-// rf.GetState() (me, term, isLeader)
-//   Ask a Raft peer for "me" (see line 58), its current term, and whether it thinks it
-//   is a leader
-//
 // ApplyCommand
 //   Each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyCommand to the service (e.g. tester) on the
@@ -34,8 +30,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/cmu440/rpc"
 )
@@ -49,6 +48,16 @@ const kLogToStdout = true
 
 // Change this to output logs to a different directory
 const kLogOutputDir = "./raftlogs/"
+
+var RANGE, LOWER = 800, 700 //used for election Intervals
+
+type RoleType int
+
+const (
+	Leader RoleType = iota
+	Candidate
+	Follower
+)
 
 //
 // ApplyCommand
@@ -70,17 +79,16 @@ type ApplyCommand struct {
 // A Go object implementing a single Raft peer
 //
 type Raft struct {
-	mux   sync.Mutex       // Lock to protect shared access to this peer's state
-	peers []*rpc.ClientEnd // RPC end points of all peers
-	me    int              // this peer's index into peers[]
-	// You are expected to create reasonably clear log files before asking a
-	// debugging question on Piazza or OH. Use of this logger is optional, and
-	// you are free to remove it completely.
-	logger *log.Logger // We provide you with a separate logger per peer.
-
-	// Your data here (2A, 2B).
-	// Look at the Raft paper's Figure 2 for a description of what
-	// state a Raft peer should maintain
+	mux         sync.Mutex       // Lock to protect shared access to this peer's state
+	peers       []*rpc.ClientEnd // RPC end points of all peers
+	me          int              // this peer's index into peers[]
+	role        RoleType
+	currTerm    int
+	votedFor    int
+	numVotes    int          //votes granted
+	numReceived int          //RPCs received
+	logger      *log.Logger  // We provide you with a separate logger per peer.
+	elecTimer   *time.Ticker //ticker for election Timeouts
 
 }
 
@@ -92,99 +100,190 @@ type Raft struct {
 // believes it is the leader
 //
 func (rf *Raft) GetState() (int, int, bool) {
-	var me int
-	var term int
-	var isleader bool
-	// Your code here (2A)
+	rf.mux.Lock() //CS for accessing state variables
+	defer rf.mux.Unlock()
+
+	me, term := rf.me, rf.currTerm
+	isleader := rf.role == Leader
+
+	rf.logger.Printf("Showing current state of server. Role is %v \n", rf.role)
 	return me, term, isleader
 }
 
-//
-// RequestVoteArgs
-// ===============
-//
-// Example RequestVote RPC arguments structure
-//
-// Please note
-// ===========
-// Field names must start with capital letters!
-//
+// RequestVote RPC arguments structure
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B)
+	Term        int
+	CandidateId int
 }
 
-//
-// RequestVoteReply
-// ================
-//
-// Example RequestVote RPC reply structure.
-//
-// Please note
-// ===========
-// Field names must start with capital letters!
-//
-//
+// RequestVote RPC reply structure.
 type RequestVoteReply struct {
-	// Your data here (2A)
+	Term        int
+	VoteGranted bool
 }
 
-//
-// RequestVote
-// ===========
-//
-// Example RequestVote RPC handler
-//
+type AppendEntriesArgs struct {
+	Term        int
+	LeaderId    int
+	isHeartbeat bool
+}
+
+type AppendEntriesReply struct {
+	Term int
+}
+
+// RequestVote RPC handler
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B)
+
+	rf.mux.Lock() //CS accessing raft DS variables
+	// rf.logger.Printf("aquired lock for RPC response")
+
+	reply.VoteGranted = false //default reply values
+	reply.Term = rf.currTerm
+
+	if args.Term >= rf.currTerm {
+
+		rf.logger.Printf("received requestVote from %v", args.CandidateId)
+
+		//Respond valid if not given out vote or given out vote to candidate in same term
+		if (args.Term == rf.currTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId)) ||
+			(args.Term > rf.currTerm) {
+
+			rf.logger.Printf("Granting requestVote to %v. resetting to follower on getting equiv or higher term.  them %v me %v", args.CandidateId, args.Term, rf.currTerm)
+			rf.votedFor = args.CandidateId
+			reply.VoteGranted = true
+
+			rf.role = Follower
+			rf.numVotes = 0
+			rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
+		}
+
+		//Update term and reply's
+		rf.currTerm = args.Term
+		reply.Term = rf.currTerm
+
+	}
+	rf.mux.Unlock()
 }
 
 //
 // sendRequestVote
 // ===============
-//
-// Example code to send a RequestVote RPC to a server
-//
-// server int -- index of the target server in
-// rf.peers[]
-//
-// args *RequestVoteArgs -- RPC arguments in args
-//
-// reply *RequestVoteReply -- RPC reply
-//
-// The types of args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers)
-//
-// The rpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost
-//
-// Call() sends a request and waits for a reply
-//
-// If a reply arrives within a timeout interval, Call() returns true;
-// otherwise Call() returns false
-//
-// Thus Call() may not return for a while
-//
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply
-//
-// Call() is guaranteed to return (perhaps after a delay)
-// *except* if the handler function on the server side does not return
-//
-// Thus there
-// is no need to implement your own timeouts around Call()
-//
-// Please look at the comments and documentation in ../rpc/rpc.go
-// for more details
-//
-// If you are having trouble getting RPC to work, check that you have
-// capitalized all field names in the struct passed over RPC, and
-// that the caller passes the address of the reply struct with "&",
-// not the struct itself
-//
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
+
+	termSent := args.Term
+
+	for {
+
+		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+
+		rf.mux.Lock() //acquire for CS
+
+		if rf.role != Candidate {
+			rf.logger.Printf("didn't check vote bc no longer candidate")
+			rf.mux.Unlock()
+			return
+		}
+
+		if termSent < rf.currTerm {
+			rf.logger.Printf("didn't check vote bc RPC was for old term %v, curr term %v", termSent, rf.currTerm)
+			rf.mux.Unlock()
+			return
+		}
+
+		if ok {
+			rf.logger.Printf("received Vote response from %v. granted status %v\n", server, reply.VoteGranted)
+
+			//Higher candidate or leader. Reset to follower. Enter new term
+			if rf.currTerm < reply.Term {
+				rf.logger.Printf("candidate resetting to follower after RPC response fro %v", server)
+				rf.currTerm = reply.Term
+				rf.role = Follower
+				rf.votedFor = -1
+				rf.numVotes = 0
+				rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
+				rf.mux.Unlock()
+				return
+			}
+
+			if reply.VoteGranted {
+				rf.numVotes++
+			}
+
+			//become leader if gotten majority
+			if rf.numVotes > len(rf.peers)/2 {
+				rf.role = Leader
+				rf.logger.Printf("became leader")
+				rf.mux.Unlock()
+
+				rf.ExecuteHeartbeat(true)
+				return
+			}
+
+			rf.mux.Unlock()
+			return //No need for retries
+
+		} else {
+			rf.mux.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+	termSent := args.Term
+
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	rf.logger.Printf("sent heartbeat to %v", server)
+
+	rf.mux.Lock() //Acquire Lock for CS
+
+	if termSent != rf.currTerm {
+		rf.logger.Printf("Ignoring heartbeat response from %v as term is old %v compared to %v", server, termSent, rf.currTerm)
+		rf.mux.Unlock()
+		return
+	}
+
+	//Leader is stale. Must Become follower
+	if ok {
+		rf.logger.Printf("received heartbeat response from %v", server)
+
+		if reply.Term > rf.currTerm {
+			rf.logger.Printf("prev leader resetting to follower on receiving AppendEntries response from %v", server)
+			rf.role = Follower
+
+			//New term. Reset election state variables
+			rf.currTerm = reply.Term
+			rf.votedFor = -1
+			rf.numVotes = 0
+			rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
+
+		}
+	}
+
+	rf.mux.Unlock()
+}
+
+//RPC AppendEntries Method Handler used for Heartbeats and Log Replication Commands
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+	rf.mux.Lock()            //CS accessing raft DS variables
+	reply.Term = rf.currTerm //default reply values
+
+	if rf.currTerm <= args.Term {
+		rf.logger.Printf("received valid heartbeat from leader %v", args.LeaderId)
+		rf.currTerm = args.Term
+		reply.Term = rf.currTerm //update terms
+
+		//Acknowledge higher current leader. Reset to follower
+		rf.role = Follower
+		rf.numVotes = 0
+		rf.votedFor = -1
+		rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
+		rf.logger.Printf("resetting to follower on getting heartbeat from %v \n", args.LeaderId)
+
+	}
+	rf.mux.Unlock()
 }
 
 //
@@ -231,41 +330,32 @@ func (rf *Raft) PutCommand(command interface{}) (int, int, bool) {
 // turn off debug output from this instance
 //
 func (rf *Raft) Stop() {
-	// Your code here, if desired
+	rf.logger.SetOutput(ioutil.Discard)
 }
 
-//
-// NewPeer
-// ====
-//
-// The service or tester wants to create a Raft server
-//
-// The port numbers of all the Raft servers (including this one)
-// are in peers[]
-//
-// This server's port is peers[me]
-//
-// All the servers' peers[] arrays have the same order
-//
 // applyCh
 // =======
-//
 // applyCh is a channel on which the tester or service expects
 // Raft to send ApplyCommand messages. You can assume the channel
 // is consumed in a timely manner.
 //
-// NewPeer() must return quickly, so it should start Goroutines
-// for any long-running work
+// Creates a New raft server with goroutines in the backgroung to handle elections
+// heartbeats and log replication
 func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.me = me
+	rf := &Raft{
+		peers:    peers,
+		me:       me, //default values
+		role:     Follower,
+		currTerm: 0,
+		votedFor: -1,
+		numVotes: 0,
+	}
 
 	if kEnableDebugLogs {
-		peerName := peers[me].String()
-		logPrefix := fmt.Sprintf("%s ", peerName)
+		// peerName := peers[me].String()
+		logPrefix := fmt.Sprintf("%s ", strconv.Itoa(rf.me)+" ")
 		if kLogToStdout {
-			rf.logger = log.New(os.Stdout, peerName, log.Lmicroseconds|log.Lshortfile)
+			rf.logger = log.New(os.Stdout, strconv.Itoa(rf.me)+" ", log.Lmicroseconds|log.Lshortfile)
 		} else {
 			err := os.MkdirAll(kLogOutputDir, os.ModePerm)
 			if err != nil {
@@ -282,7 +372,131 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 		rf.logger = log.New(ioutil.Discard, "", 0)
 	}
 
-	// Your initialization code here (2A, 2B)
+	rf.elecTimer = time.NewTicker(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
+
+	//Initialize Background goroutines
+	go rf.ElectionRoutine()
+	go rf.HeartBeatRoutine()
 
 	return rf
+}
+
+//Periodically holds elections for Follower & Candidate peers
+func (rf *Raft) ElectionRoutine() {
+	for {
+		rf.mux.Lock() //Acquire Lock to check state
+		select {
+		case <-rf.elecTimer.C:
+			//reset timeout duration
+			rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
+
+			switch rf.role {
+			case Follower:
+				rf.logger.Printf("New election. follower became candidate")
+
+				//Become candidate if not heard from leader or given out vote
+				rf.role = Candidate
+				rf.currTerm++
+				rf.votedFor = rf.me
+				rf.numVotes = 1
+				rf.numReceived = 0
+				rf.mux.Unlock()
+
+				rf.ExecuteCandidate()
+
+			//Retry in the event of a split vote
+			case Candidate:
+				rf.logger.Printf("old candiate started new election")
+				//update state
+				rf.currTerm++
+				rf.votedFor = rf.me
+				rf.numVotes = 1
+				rf.numReceived = 0
+				rf.mux.Unlock()
+
+				rf.ExecuteCandidate()
+
+				//No action
+			case Leader:
+				rf.mux.Unlock()
+			}
+		default:
+			rf.mux.Unlock()
+		}
+	}
+}
+
+//Background routine for Leader to send heartbeats to other servers
+func (rf *Raft) HeartBeatRoutine() {
+
+	INTERVAL := 100
+	OFFSET := 50
+
+	for {
+		rf.ExecuteHeartbeat(false)
+
+		rf.mux.Lock()
+		if rf.role == Leader {
+			rf.mux.Unlock()
+			time.Sleep(time.Millisecond * time.Duration(rand.Intn(OFFSET)+INTERVAL))
+		} else {
+			rf.mux.Unlock()
+		}
+	}
+}
+
+//Sends RequestVote RPCs to other peers in parallel
+func (rf *Raft) ExecuteCandidate() {
+
+	//Lock while preparing RPC args. Release during RPC
+	rf.mux.Lock()
+	rf.logger.Printf("acquired for making  req Vote RPC args")
+	args := &RequestVoteArgs{
+		Term:        rf.currTerm,
+		CandidateId: rf.me,
+	}
+	rf.mux.Unlock()
+
+	//Send request vote to peer servers and parse response
+	for i, _ := range rf.peers {
+		if i != rf.me {
+			reply := &RequestVoteReply{}
+
+			go rf.sendRequestVote(i, args, reply)
+		}
+	}
+}
+
+//Sends AppendEntry heartbeats from raft to peer servers
+func (rf *Raft) ExecuteHeartbeat(now bool) {
+
+	//role modified elsewhere, no action, release lock
+	rf.mux.Lock()
+	if rf.role != Leader {
+		rf.mux.Unlock()
+		return
+	}
+
+	//Make RPC args
+	args := &AppendEntriesArgs{
+		Term:        rf.currTerm,
+		LeaderId:    rf.me,
+		isHeartbeat: true,
+	}
+
+	if !now {
+		rf.mux.Unlock()
+	}
+
+	for i, _ := range rf.peers {
+		if i != rf.me {
+
+			reply := &AppendEntriesReply{}
+			go rf.sendHeartBeat(i, args, reply)
+		}
+	}
+
+	if now {
+		rf.mux.Unlock()
+	}
 }
