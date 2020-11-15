@@ -41,7 +41,7 @@ import (
 
 // Set to false to disable debug logs completely
 // Make sure to set kEnableDebugLogs to false before submitting
-const kEnableDebugLogs = true
+const kEnableDebugLogs = false
 
 // Set to true to log to stdout instead of file
 const kLogToStdout = true
@@ -49,7 +49,7 @@ const kLogToStdout = true
 // Change this to output logs to a different directory
 const kLogOutputDir = "./raftlogs/"
 
-var RANGE, LOWER = 800, 700 //used for election Intervals
+var RANGE, LOWER = 250, 800 //used for election Intervals
 
 type RoleType int
 
@@ -243,9 +243,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 					}
 				}
 
+				rf.ExecuteHeartbeat()
 				rf.mux.Unlock()
-
-				rf.ExecuteHeartbeat(true)
 				return
 			}
 
@@ -261,9 +260,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	// rf.logger.Printf("sent heartbeat to %v", server)
 
 	rf.mux.Lock() //Acquire Lock for CS
+	rf.logger.Printf("sent heartbeat to %v", server)
 
 	if ok {
 		// rf.logger.Printf("received heartbeat response from %v", server)
@@ -280,8 +279,8 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 			rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
 		}
 	}
-
 	rf.mux.Unlock()
+
 }
 
 //RPC AppendEntries Method Handler used for Heartbeats and Log Replication Commands
@@ -289,7 +288,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.mux.Lock()            //CS accessing peer DS variables
 	reply.Term = rf.currTerm //default reply values
-	reply.success = false
+	reply.Success = false
 
 	rf.logger.Printf("received append entries with prevIdx %v prevTerm %v entries %v", args.PrevLogIdx, args.PrevLogTerm, args.Entries)
 	if rf.currTerm <= args.Term {
@@ -313,7 +312,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mux.Unlock()
 		return
 	}
-	reply.success = true
+	reply.Success = true
 	rf.logger.Printf("append successful request %v, reply %v", args, reply)
 
 	//update log and replicate using leaders' entries
@@ -456,41 +455,31 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 //Periodically holds elections for Follower & Candidate peers
 func (rf *Raft) ElectionRoutine() {
 	for {
-		rf.mux.Lock() //Acquire Lock to check state
+		// rf.mux.Lock()
 		select {
 		case <-rf.elecTimer.C:
+			rf.mux.Lock() //Acquire Lock to check state
+
 			//reset timeout duration
 			rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
 
-			switch rf.role {
-			case Follower:
-				// rf.logger.Printf("New election. follower became candidate")
+			//Retry if did not win or follower not heard from leader
+			if rf.role == Candidate || rf.role == Follower {
+				rf.logger.Printf("New election. follower became candidate")
 
-				//Become candidate if not heard from leader or given out vote
 				rf.role = Candidate
 				rf.currTerm++
 				rf.votedFor = rf.me
 				rf.numVotes = 1
-				rf.mux.Unlock()
 
-				rf.ExecuteCandidate()
+				args := &RequestVoteArgs{
+					Term:        rf.currTerm,
+					CandidateId: rf.me,
+				}
 
-			//Retry in the event of a split vote
-			case Candidate:
-				// rf.logger.Printf("old candiate started new election")
-				//update state
-				rf.currTerm++
-				rf.votedFor = rf.me
-				rf.numVotes = 1
-				rf.mux.Unlock()
-
-				rf.ExecuteCandidate()
-
-				//No action
-			case Leader:
-				rf.mux.Unlock()
+				rf.ExecuteCandidate(args)
 			}
-		default:
+
 			rf.mux.Unlock()
 		}
 	}
@@ -500,54 +489,36 @@ func (rf *Raft) ElectionRoutine() {
 func (rf *Raft) HeartBeatRoutine() {
 
 	INTERVAL := 100
-	OFFSET := 50
 
 	for {
-		rf.ExecuteHeartbeat(false)
-
+		//role modified elsewhere, no action, release lock
 		rf.mux.Lock()
+
 		if rf.role == Leader {
-			rf.mux.Unlock()
-			time.Sleep(time.Millisecond * time.Duration(rand.Intn(OFFSET)+INTERVAL))
-		} else {
-			rf.mux.Unlock()
+			rf.ExecuteHeartbeat()
 		}
+		rf.mux.Unlock()
+
+		//Sleep till next interval
+		time.Sleep(time.Millisecond * time.Duration(INTERVAL))
+
 	}
 }
 
 //Sends RequestVote RPCs to other peers in parallel
-func (rf *Raft) ExecuteCandidate() {
-
-	//Lock while preparing RPC args. Release during RPC
-	rf.mux.Lock()
-	// rf.logger.Printf("acquired for making  req Vote RPC args")
-	args := &RequestVoteArgs{
-		Term:        rf.currTerm,
-		CandidateId: rf.me,
-		LastLogIdx:  len(rf.log) - 1,
-		LastLogTerm: rf.log[len(rf.log)-1].Term,
-	}
-	rf.mux.Unlock()
+func (rf *Raft) ExecuteCandidate(args *RequestVoteArgs) {
 
 	//Send request vote to peer servers and parse response
 	for i, _ := range rf.peers {
 		if i != rf.me {
 			reply := &RequestVoteReply{}
-
 			go rf.sendRequestVote(i, args, reply)
 		}
 	}
 }
 
 //Sends AppendEntry heartbeats from raft to peer servers
-func (rf *Raft) ExecuteHeartbeat(now bool) {
-
-	//role modified elsewhere, no action, release lock
-	rf.mux.Lock()
-	if rf.role != Leader {
-		rf.mux.Unlock()
-		return
-	}
+func (rf *Raft) ExecuteHeartbeat() {
 
 	for i, _ := range rf.peers {
 		if i != rf.me {
@@ -665,8 +636,8 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 				return
 			}
 
-			rf.logger.Printf("Append entry reply state from %v %v", server, reply.success)
-			if reply.success {
+			rf.logger.Printf("Append entry reply state from %v %v", server, reply.Success)
+			if reply.Success {
 				rf.numSuceeded++
 
 				//update server's idx variables
