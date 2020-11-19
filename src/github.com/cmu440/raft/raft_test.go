@@ -158,6 +158,7 @@ func TestFailAgree2B(t *testing.T) {
 	fmt.Printf("Checking one leader\n")
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
+	fmt.Printf("disconnected peer is %v\n", (leader+1)%servers)
 
 	fmt.Printf("Checking agreement with one disconnected peer\n")
 	// agree despite two disconnected servers?
@@ -176,6 +177,58 @@ func TestFailAgree2B(t *testing.T) {
 	cfg.one(107, servers)
 
 	fmt.Printf("======================= END =======================\n\n")
+}
+
+func TestFailAgreeHidden2B(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 5
+
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Hidden Test (2B): agreement despite \nfollower disconnection\n")
+
+	// follower network disconnection
+	fmt.Printf("Checking one leader\n")
+	leader := cfg.checkOneLeader()
+	cfg.disconnect((leader + 1) % servers)
+	fmt.Printf("disconnected peer is %v\n", (leader+1)%servers)
+
+	fmt.Printf("Checking agreement with one disconnected peer\n")
+	// agree despite two disconnected servers?
+	cfg.one(102, servers-1)
+	cfg.one(103, servers-1)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(104, servers-1)
+	cfg.one(105, servers-1)
+
+	cfg.disconnect((leader + 2) % servers)
+	fmt.Printf("disconnected peer is %v\n", (leader+2)%servers)
+
+	fmt.Printf("Checking agreement with two disconnected peers\n")
+	// agree despite two disconnected servers?
+	cfg.one(106, servers-2)
+	cfg.one(107, servers-2)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(108, servers-2)
+	cfg.one(109, servers-2)
+
+	// re-connect
+	cfg.connect((leader + 1) % servers)
+	fmt.Printf("Checking with first reconnected server\n")
+	// agree with more set of servers?
+	cfg.one(110, servers-1)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(111, servers-1)
+
+	// re-connect
+	cfg.connect((leader + 2) % servers)
+	fmt.Printf("Checking with second reconnected server\n")
+	// agree with more set of servers?
+	cfg.one(112, servers)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(113, servers)
+
 }
 
 func TestFailNoAgree2B(t *testing.T) {
@@ -237,6 +290,58 @@ func TestFailNoAgree2B(t *testing.T) {
 	fmt.Printf("======================= END =======================\n\n")
 }
 
+func TestRejoinHidden2B(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2B): rejoin of partitioned leader\n")
+
+	leader1 := cfg.checkOneLeader()
+
+	fmt.Printf("Checking agreement\n")
+	cfg.one(101, servers)
+
+	fmt.Printf("Disconnecting leader: %v\n", leader1)
+	cfg.disconnect(leader1)
+
+	//Disconnected leader doesn't apply commmands ?
+	fmt.Printf("Sending 3 commands to disconnected leader\n")
+	cfg.rafts[leader1].PutCommand(102)
+	cfg.rafts[leader1].PutCommand(103)
+	cfg.rafts[leader1].PutCommand(104)
+
+	// time.Sleep(RaftElectionTimeout)
+
+	fmt.Printf("Checking for new leader\n")
+	leader2 := cfg.checkOneLeader()
+
+	fmt.Printf("Checking agreement on new leader\n")
+	cfg.one(105, servers-1)
+
+	fmt.Printf("Disconnecting new leader:%v \n", leader2)
+	cfg.disconnect(leader2)
+
+	fmt.Printf("Connecting first disconnected leader:%v \n", leader1)
+	cfg.connect(leader1)
+
+	fmt.Printf("Checking agreement\n")
+
+	cfg.one(106, servers-1)
+	cfg.one(107, servers-1)
+
+	fmt.Printf("Connecting second disconnected leader:%v \n", leader2)
+	cfg.connect(leader2)
+
+	fmt.Printf("Checking agreement\n")
+
+	cfg.one(108, servers)
+	cfg.one(109, servers)
+
+	fmt.Printf("Checking agreement on new leader\n")
+}
+
 func TestConcurrentPutCommands2B(t *testing.T) {
 	fmt.Printf("==================== 3 SERVERS ====================\n")
 	servers := 3
@@ -275,6 +380,7 @@ loop:
 					return
 				}
 				is <- i
+				// fmt.Printf("putting %v in channel\n", i)
 			}(ii)
 		}
 
@@ -291,6 +397,7 @@ loop:
 		failed := false
 		cmds := []int{}
 		for index := range is {
+			fmt.Printf("curr Idx %v\n", index)
 			cmd := cfg.wait(index, servers, term)
 			if ix, ok := cmd.(int); ok {
 				if ix == -1 {
@@ -301,6 +408,7 @@ loop:
 					break
 				}
 				cmds = append(cmds, ix)
+				// fmt.Printf("commited commands %v\n", cmds)
 			} else {
 				t.Fatalf("Value %v is not an int", cmd)
 			}
@@ -714,6 +822,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
+		// fmt.Printf("server %v's commited %v\n", i, cfg.logs[i])
 		cfg.mu.Unlock()
 
 		if ok {
@@ -725,6 +834,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 			cmd = cmd1
 		}
 	}
+	// fmt.Printf("returning cmd %v count %v\n", cmd, count)
 	return count, cmd
 }
 
@@ -784,8 +894,10 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.PutCommand(cmd)
+				// fmt.Printf("promised idx %v leader status %v\n", index1, ok)
 				if ok {
 					index = index1
+					// fmt.Printf("expected index %v\n", index1)
 					break
 				}
 			}
@@ -801,12 +913,14 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
 						// and it was the command we submitted.
+						// fmt.Printf("idx commited fine in time range %v\n", index)
 						return index
 					}
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
 		} else {
+			// fmt.Printf("bad idx received\n")
 			time.Sleep(50 * time.Millisecond)
 		}
 	}

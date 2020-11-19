@@ -1,0 +1,10 @@
+4  19:08:26.381640 raft.go:455: logger initialized
+4  19:08:27.193185 raft.go:164: received requestVote from 0 with lastIdx 0, lastTerm -1
+4  19:08:27.290451 raft.go:329: updated log just after append [{<nil> -1} {10 1}] 
+4  19:08:27.384961 raft.go:347: leader commit idx 1 follower updated commit Idx to  1
+4  19:08:27.388406 raft.go:749: new items to apply [{10 1}]
+4  19:08:28.002213 raft.go:329: updated log just after append [{<nil> -1} {10 1} {20 1}] 
+4  19:08:30.605361 raft.go:164: received requestVote from 1 with lastIdx 1, lastTerm 1
+4  19:08:30.968577 raft.go:329: updated log just after append [{<nil> -1} {10 1} {30 4} {1000 4}] 
+4  19:08:31.036863 raft.go:347: leader commit idx 3 follower updated commit Idx to  3
+4  19:08:31.083685 raft.go:749: new items to apply [{30 4} {1000 4}]

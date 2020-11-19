@@ -1,10 +1,6 @@
-//
 // raft.go
 // =======
-// Write your code in this file
-// We will use the original version of all other
-// files for testing
-//
+// Implements Google's Raft algorithim
 
 package raft
 
@@ -49,7 +45,7 @@ const kLogToStdout = true
 // Change this to output logs to a different directory
 const kLogOutputDir = "./raftlogs/"
 
-var RANGE, LOWER = 250, 800 //used for election Intervals
+var RANGE, LOWER = 250, 800 //range used for election Intervals
 
 type RoleType int
 
@@ -74,10 +70,8 @@ type ApplyCommand struct {
 
 //
 // Raft struct
-// ===========
-//
+// ===========ß
 // A Go object implementing a single Raft peer
-//
 type Raft struct {
 	mux         sync.Mutex       // Lock to protect shared access to this peer's state
 	peers       []*rpc.ClientEnd // RPC end points of all peers
@@ -86,25 +80,22 @@ type Raft struct {
 	currTerm    int
 	votedFor    int
 	numVotes    int          //votes acquired
-	numSuceeded int          //successful appends
 	logger      *log.Logger  // We provide you with a separate logger per peer.
 	elecTimer   *time.Ticker //ticker for election Timeouts
-	cmdCh       chan interface{}
 	applyCh     chan ApplyCommand
 	commitIdx   int   //idx of highest committed entry
 	lastApplied int   //idx of highest entry applied to state machine
 	nextIdx     []int //idx of next log entry to send per server
 	matchIdx    []int //idx of highest entry known to be replicated per server
 	log         []logEntry
+	backlog     []interface{} //log entries to be later committed
 }
 
 //
 // GetState()
 // ==========
-//
-// Return "me", current term and whether this peer
+// Returns "me", current term and whether this peer
 // believes it is the leader
-//
 func (rf *Raft) GetState() (int, int, bool) {
 	rf.mux.Lock() //CS for accessing state variables
 	defer rf.mux.Unlock()
@@ -112,7 +103,6 @@ func (rf *Raft) GetState() (int, int, bool) {
 	me, term := rf.me, rf.currTerm
 	isleader := rf.role == Leader
 
-	rf.logger.Printf("Showing current state of server. Role is %v \n", rf.role)
 	return me, term, isleader
 }
 
@@ -150,30 +140,29 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-// RequestVote RPC handler
+// Handles RequestVote RPC from candidate
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	rf.mux.Lock() //CS accessing raft DS variables
-	// rf.logger.Printf("aquired lock for RPC response")
+	defer rf.mux.Unlock()
 
 	reply.VoteGranted = false //default reply values
 	reply.Term = rf.currTerm
 
 	if args.Term >= rf.currTerm {
 
-		// rf.logger.Printf("received requestVote from %v", args.CandidateId)
-
-		//Respond valid if not given out vote or given out vote to candidate in same term
+		//Respond yes if not given out vote or given out vote to candidate in same term
 		//and candidate's log is up to date
-		if (args.LastLogIdx >= len(rf.log)-1 && args.LastLogTerm >= rf.log[len(rf.log)-1].Term) &&
-			(args.Term == rf.currTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId)) ||
-			(args.Term > rf.currTerm) {
+		lastIdx := len(rf.log) - 1
+		if (args.LastLogTerm > rf.log[lastIdx].Term ||
+			(args.LastLogTerm == rf.log[lastIdx].Term && args.LastLogIdx >= lastIdx)) &&
+			((args.Term == rf.currTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId)) ||
+				(args.Term > rf.currTerm)) {
 
-			// rf.logger.Printf("Granting requestVote to %v. resetting to follower on getting equiv or higher term.  them %v me %v", args.CandidateId, args.Term, rf.currTerm)
 			rf.votedFor = args.CandidateId
 			reply.VoteGranted = true
 
-			rf.role = Follower
+			rf.role = Follower //reset to follower
 			rf.numVotes = 0
 			rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
 		}
@@ -181,14 +170,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//Update term and reply's
 		rf.currTerm = args.Term
 		reply.Term = rf.currTerm
-
 	}
-	rf.mux.Unlock()
 }
 
-//
-// sendRequestVote
-// ===============
+//Sends a non-blocking requestVote RPC from a candidate to a single server and handles
+//the response
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	termSent := args.Term
@@ -199,24 +185,21 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 		rf.mux.Lock() //acquire for CS
 
-		if rf.role != Candidate {
-			// rf.logger.Printf("didn't check vote bc no longer candidate")
+		if rf.role != Candidate { //discard if no longer candidate
 			rf.mux.Unlock()
 			return
 		}
 
+		// Discard if old term. Elected, New election started, or became follower
 		if termSent < rf.currTerm {
-			// rf.logger.Printf("didn't check vote bc RPC was for old term %v, curr term %v", termSent, rf.currTerm)
 			rf.mux.Unlock()
 			return
 		}
 
 		if ok {
-			// rf.logger.Printf("received Vote response from %v. granted status %v\n", server, reply.VoteGranted)
 
 			//Higher candidate or leader. Reset to follower. Enter new term
 			if rf.currTerm < reply.Term {
-				// rf.logger.Printf("candidate resetting to follower after RPC response fro %v", server)
 				rf.currTerm = reply.Term
 				rf.role = Follower
 				rf.votedFor = -1
@@ -233,10 +216,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			//become leader if gotten majority
 			if rf.numVotes > len(rf.peers)/2 {
 				rf.role = Leader
-				// rf.logger.Printf("became leader")
+				rf.backlog = rf.backlog[:0] //clear backlog
 
-				//reset all log next indices to leader's last entry + 1
-				rf.logger.Printf("new leader restting other servers' log idx to %v", len(rf.log))
+				//reset all log next indices to leader's last log Idx + 1
 				for i := range rf.nextIdx {
 					if i != rf.me {
 						rf.nextIdx[i] = len(rf.log)
@@ -247,29 +229,27 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 				rf.mux.Unlock()
 				return
 			}
-
 			rf.mux.Unlock()
 			return //No need for retries
 
 		} else {
+			args.LastLogIdx = len(rf.log) - 1 //update arguments and retry
+			args.LastLogTerm = rf.log[len(rf.log)-1].Term
 			rf.mux.Unlock()
 		}
 	}
 }
 
+//Sends non-blocking RPC Heartbeat to follower, waits and parses response
 func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 
 	rf.mux.Lock() //Acquire Lock for CS
-	rf.logger.Printf("sent heartbeat to %v", server)
 
 	if ok {
-		// rf.logger.Printf("received heartbeat response from %v", server)
-
 		//Leader is stale. Must Become follower
 		if reply.Term > rf.currTerm {
-			// rf.logger.Printf("prev leader resetting to follower on receiving AppendEntries response from %v", server)
 			rf.role = Follower
 
 			//New term. Reset election state variables
@@ -280,19 +260,18 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesArgs, reply *Append
 		}
 	}
 	rf.mux.Unlock()
-
 }
 
 //RPC AppendEntries Method Handler used for Heartbeats and Log Replication Commands
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
-	rf.mux.Lock()            //CS accessing peer DS variables
+	rf.mux.Lock() //CS accessing peer DS variables
+	defer rf.mux.Unlock()
+
 	reply.Term = rf.currTerm //default reply values
 	reply.Success = false
 
-	rf.logger.Printf("received append entries with prevIdx %v prevTerm %v entries %v", args.PrevLogIdx, args.PrevLogTerm, args.Entries)
 	if rf.currTerm <= args.Term {
-		// rf.logger.Printf("received valid heartbeat from leader %v", args.LeaderId)
 		rf.currTerm = args.Term
 		reply.Term = rf.currTerm //update terms
 
@@ -301,22 +280,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.numVotes = 0
 		rf.votedFor = -1
 		rf.elecTimer.Reset(time.Duration(rand.Intn(RANGE)+LOWER) * time.Millisecond)
-		// rf.logger.Printf("resetting to follower on getting heartbeat from %v \n", args.LeaderId)
 
+	} else {
+		return
 	}
 
 	//check if raft contains different entry at prevLogIdx
-	if args.PrevLogIdx > 0 && (len(rf.log)-1 < args.PrevLogIdx || rf.log[args.PrevLogIdx].Term != args.PrevLogTerm) {
-		rf.logger.Printf("append unsuccessful")
-
-		rf.mux.Unlock()
+	if args.PrevLogIdx > 0 &&
+		(len(rf.log)-1 < args.PrevLogIdx || rf.log[args.PrevLogIdx].Term != args.PrevLogTerm) {
 		return
 	}
 	reply.Success = true
-	rf.logger.Printf("append successful request %v, reply %v", args, reply)
 
 	//update log and replicate using leaders' entries
 	if !args.IsHeartbeat {
+
 		rf.log = rf.log[:args.PrevLogIdx+1]
 		rf.log = append(rf.log, args.Entries...)
 
@@ -324,78 +302,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//Set commit idx to min(leaderCommit, lastEntry idx)
 	if args.LeaderCommitIdx > rf.commitIdx {
+
+		//update commitIdx
 		rf.commitIdx = args.LeaderCommitIdx
 		lastIdx := len(rf.log) - 1
 		if lastIdx < rf.commitIdx {
 			rf.commitIdx = lastIdx
 		}
 	}
-
-	rf.mux.Unlock()
 }
 
-//
 // PutCommand
 // =====
-//
-// The service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log
-//
-// If this server is not the leader, return false
-//
-// Otherwise start the agreement and return immediately
-//
-// There is no guarantee that this command will ever be committed to
-// the Raft log, since the leader may fail or lose an election
-//
+//  Starts a command  agreement if the server is a leader and return immediately
 // The first return value is the index that the command will appear at
 // if it is ever committed
-//
-// The second return value is the current term
-//
+// The second return value is the peer's current term
 // The third return value is true if this server believes it is
 // the leader
-//
 func (rf *Raft) PutCommand(command interface{}) (int, int, bool) {
 
 	rf.mux.Lock()
 	defer rf.mux.Unlock()
 
-	index := len(rf.log)
+	index := len(rf.log) + len(rf.backlog)
 	term := rf.currTerm
 	isLeader := rf.role == Leader
 
 	if isLeader {
-		rf.logger.Printf("Leader received new put Command %v\n", command)
-		rf.cmdCh <- command
+		rf.backlog = append(rf.backlog, command)
 	}
 
 	return index, term, isLeader
 }
 
-//
 // Stop
 // ====
-//
-// The tester calls Stop() when a Raft instance will not
-// be needed again
-//
-// You are not required to do anything
-// in Stop(), but it might be convenient to (for example)
-// turn off debug output from this instance
-//
+//Turns off a peers debug output
 func (rf *Raft) Stop() {
 	rf.logger.SetOutput(ioutil.Discard)
 }
 
-// applyCh
-// =======
-// applyCh is a channel on which the tester or service expects
-// Raft to send ApplyCommand messages. You can assume the channel
-// is consumed in a timely manner.
-//
-// Creates a New raft server with goroutines in the backgroung to handle elections
-// heartbeats and log replication
+// Creates a New server and associated data structures
+// with goroutines in the backgroung to handle elections log replication
 func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf := &Raft{
 		peers:       peers,
@@ -410,7 +359,7 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 		matchIdx:    make([]int, len(peers), len(peers)), //init to zero values
 		nextIdx:     make([]int, len(peers), len(peers)),
 		log:         make([]logEntry, 0),
-		cmdCh:       make(chan interface{}),
+		backlog:     make([]interface{}, 0),
 	}
 
 	for i := range rf.nextIdx {
@@ -435,7 +384,6 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 			}
 			rf.logger = log.New(logOutputFile, logPrefix, log.Lmicroseconds|log.Lshortfile)
 		}
-		rf.logger.Println("logger initialized")
 	} else {
 		rf.logger = log.New(ioutil.Discard, "", 0)
 	}
@@ -455,7 +403,6 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 //Periodically holds elections for Follower & Candidate peers
 func (rf *Raft) ElectionRoutine() {
 	for {
-		// rf.mux.Lock()
 		select {
 		case <-rf.elecTimer.C:
 			rf.mux.Lock() //Acquire Lock to check state
@@ -465,52 +412,50 @@ func (rf *Raft) ElectionRoutine() {
 
 			//Retry if did not win or follower not heard from leader
 			if rf.role == Candidate || rf.role == Follower {
-				rf.logger.Printf("New election. follower became candidate")
 
 				rf.role = Candidate
 				rf.currTerm++
 				rf.votedFor = rf.me
 				rf.numVotes = 1
 
-				args := &RequestVoteArgs{
-					Term:        rf.currTerm,
-					CandidateId: rf.me,
-				}
-
-				rf.ExecuteCandidate(args)
+				rf.ExecuteCandidate()
 			}
-
 			rf.mux.Unlock()
 		}
 	}
 }
 
-//Background routine for Leader to send heartbeats to other servers
+//Background routine for Leader to periodically
+// send heartbeats to other servers
 func (rf *Raft) HeartBeatRoutine() {
 
 	INTERVAL := 100
 
 	for {
-		//role modified elsewhere, no action, release lock
 		rf.mux.Lock()
 
 		if rf.role == Leader {
 			rf.ExecuteHeartbeat()
 		}
-		rf.mux.Unlock()
+		rf.mux.Unlock() //role modified elsewhere, no action
 
-		//Sleep till next interval
-		time.Sleep(time.Millisecond * time.Duration(INTERVAL))
-
+		time.Sleep(time.Millisecond * time.Duration(INTERVAL)) //Send at intervals
 	}
 }
 
 //Sends RequestVote RPCs to other peers in parallel
-func (rf *Raft) ExecuteCandidate(args *RequestVoteArgs) {
+func (rf *Raft) ExecuteCandidate() {
 
-	//Send request vote to peer servers and parse response
+	//Create RPC args, and spawn goroutines to send request and parse responses
 	for i, _ := range rf.peers {
 		if i != rf.me {
+			args := &RequestVoteArgs{
+				Term:        rf.currTerm,
+				CandidateId: rf.me,
+				LastLogIdx:  len(rf.log) - 1,
+				LastLogTerm: rf.log[len(rf.log)-1].Term,
+			}
+
 			reply := &RequestVoteReply{}
 			go rf.sendRequestVote(i, args, reply)
 		}
@@ -525,31 +470,35 @@ func (rf *Raft) ExecuteHeartbeat() {
 
 			//Make RPC args
 			args := &AppendEntriesArgs{
-				Term:            rf.currTerm,
-				LeaderId:        rf.me,
-				LeaderCommitIdx: rf.commitIdx,
-				IsHeartbeat:     true,
+				Term:     rf.currTerm,
+				LeaderId: rf.me,
+				// LeaderCommitIdx: rf.commitIdx,
+				IsHeartbeat: true,
 			}
 			args.PrevLogIdx = rf.nextIdx[i] - 1
 			args.PrevLogTerm = rf.log[args.PrevLogIdx].Term
+
+			args.LeaderCommitIdx = rf.commitIdx
+			if args.PrevLogIdx < args.LeaderCommitIdx {
+				args.LeaderCommitIdx = args.PrevLogIdx
+			}
 
 			reply := &AppendEntriesReply{}
 			go rf.sendHeartBeat(i, args, reply)
 		}
 	}
-
-	rf.mux.Unlock()
 }
 
-//Routine for handling client append Requests
+//Routine for initiating client commit Requests
 func (rf *Raft) commandRoutine() {
+	INTERVAL := 50
 
 	for {
-		select {
-		case cmd := <-rf.cmdCh:
-
-			rf.mux.Lock()
-			rf.logger.Printf("leader routine received command %v", cmd)
+		rf.mux.Lock()
+		if rf.role == Leader && len(rf.backlog) > 0 {
+			//pop cmd from backlog
+			cmd := rf.backlog[0]
+			rf.backlog = rf.backlog[1:]
 
 			//Apply command to leader state machine
 			newEntry := logEntry{
@@ -558,72 +507,82 @@ func (rf *Raft) commandRoutine() {
 			}
 			rf.log = append(rf.log, newEntry)
 
-			//Send to candidates and await response
-			rf.numSuceeded = 0
-			rf.executeAppendEntries()
+			//Send to followers to replicate and await response
+			rf.executeAppendEntries(newEntry)
 
 			rf.mux.Unlock()
+		} else {
+			rf.mux.Unlock()
+			time.Sleep(time.Millisecond * time.Duration(INTERVAL)) //prevent waste of CPU resources
 		}
 	}
 }
 
-func (rf *Raft) executeAppendEntries() {
+//Makes AppendEntries RPC args and spawns routines to send RPC from
+//Leader to followers in parallel,
+func (rf *Raft) executeAppendEntries(newEntry logEntry) {
 
 	for i := range rf.peers {
 		if i != rf.me {
 			//Make RPC arguments per server
 			args := &AppendEntriesArgs{
-				Term:            rf.currTerm,
-				LeaderId:        rf.me,
-				LeaderCommitIdx: rf.commitIdx,
-				IsHeartbeat:     false,
+				Term:        rf.currTerm,
+				LeaderId:    rf.me,
+				IsHeartbeat: false,
 			}
 
 			args.PrevLogIdx = rf.nextIdx[i] - 1
-			if args.PrevLogIdx != 0 {
+			if args.PrevLogIdx != 0 { //prevent idx out of range for initial value
 				args.PrevLogTerm = rf.log[args.PrevLogIdx].Term
 			} else {
 				args.PrevLogTerm = -1
 			}
-			args.Entries = rf.log[rf.nextIdx[i]:len(rf.log)]
+
+			args.LeaderCommitIdx = rf.commitIdx
+			//edge case, sent commit Idx shouldn't be higher than matchIdx
+			if args.PrevLogIdx < args.LeaderCommitIdx {
+				args.LeaderCommitIdx = args.PrevLogIdx
+			}
+			args.Entries = rf.log[args.PrevLogIdx+1:]
+			logLength := len(rf.log)
 
 			//Send in background
-			go rf.sendAppendEntries(i, args)
-
+			go rf.sendAppendEntries(i, args, logLength)
 		}
 	}
-
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
+//Sends non-blocking AppendEntries from a Leader to Followers and handles responses
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, initLogLength int) {
 
 	termSent := args.Term
 
 	for {
-		rf.logger.Printf("new append entries sent to %v", server)
+		//Don't send if new PutCommand, RPC called later will handle
+		rf.mux.Lock()
+		if len(rf.log) > initLogLength {
+			rf.mux.Unlock()
+			return
+		}
+		rf.mux.Unlock()
+
 		reply := &AppendEntriesReply{}
 		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 
 		rf.mux.Lock()
-		//Discard response if no longer Leader
-		if rf.role != Leader {
-			// rf.logger.Printf("didn't check appendEntries response bc no longer leader")
+		if rf.role != Leader { //Discard response if no longer Leader
 			rf.mux.Unlock()
 			return
 		}
 
-		//Discard response if term is old
-		if termSent < rf.currTerm {
-			// rf.logger.Printf("didn't check appendEntry bc was for old term %v, curr term %v", termSent, rf.currTerm)
+		if termSent < rf.currTerm { //Discard response if term is old
 			rf.mux.Unlock()
 			return
 		}
 
 		if ok {
-
 			//Leader is stale. Must Become follower
 			if reply.Term > rf.currTerm {
-				// rf.logger.Printf("prev leader resetting to follower on receiving AppendEntries response from %v", server)
 				rf.role = Follower
 
 				//New term. Reset election state variables
@@ -636,61 +595,74 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) {
 				return
 			}
 
-			rf.logger.Printf("Append entry reply state from %v %v", server, reply.Success)
-			if reply.Success {
-				rf.numSuceeded++
+			if len(rf.log) > initLogLength { //Don't parse response, newer RPC will handle
+				rf.mux.Unlock()
+				return
+			}
 
+			if reply.Success {
 				//update server's idx variables
 				rf.nextIdx[server] = rf.nextIdx[server] + len(args.Entries)
 				rf.matchIdx[server] = rf.nextIdx[server] - 1
 
 				//fast forward commit idx if majority Append successes recieved
-				if rf.numSuceeded+1 > len(rf.peers)/2 {
-					curr := rf.commitIdx
-					for i := curr + 1; i < len(rf.log); i++ {
+				old := rf.commitIdx
+				for i := old + 1; i < len(rf.log); i++ {
 
-						if rf.log[i].Term != rf.currTerm { //new commit idx term must be current
-							continue
+					if rf.log[i].Term != rf.currTerm { //new commit idx term must be for currTerm
+						continue
+					}
+					//majority with match Idx at least target commmit Idx
+					numCount := 0
+					for who, peerIdx := range rf.matchIdx {
+						if who != rf.me && peerIdx >= i {
+							numCount++
 						}
-						//majority with match Idx at least target commmit Idx
-						numCount := 0
-						for _, peerIdx := range rf.matchIdx {
-							if peerIdx != rf.me && peerIdx >= i {
-								numCount++
-							}
-						}
-						if numCount+1 > len(rf.peers)/2 {
-							rf.commitIdx = i
-						}
+					}
+					if numCount+1 > len(rf.peers)/2 {
+						rf.commitIdx = i
 					}
 				}
 
 				rf.mux.Unlock()
 				return //no need for retries
-
 			} else {
 				rf.nextIdx[server]--                     //decrement nextIdx.
 				args.PrevLogIdx = rf.nextIdx[server] - 1 //  Update arguments.
 				args.PrevLogTerm = rf.log[args.PrevLogIdx].Term
+
 				args.LeaderCommitIdx = rf.commitIdx
+				if args.PrevLogIdx < args.LeaderCommitIdx {
+					args.LeaderCommitIdx = args.PrevLogIdx
+				}
+				args.Entries = rf.log[args.PrevLogIdx+1:]
 
 				rf.mux.Unlock()
 				continue //Retry till successful
 			}
-
 		} else {
+			args.PrevLogIdx = rf.nextIdx[server] - 1 //  Update arguments.
+			args.PrevLogTerm = rf.log[args.PrevLogIdx].Term
+
+			args.LeaderCommitIdx = rf.commitIdx
+			if args.PrevLogIdx < args.LeaderCommitIdx {
+				args.LeaderCommitIdx = args.PrevLogIdx
+			}
+			args.Entries = rf.log[args.PrevLogIdx+1:]
 			rf.mux.Unlock() //No response. retries needed
 		}
-
 	}
 }
 
+//Periodically applies new committed log entries to state machine
 func (rf *Raft) ApplyRoutine() {
 
+	INTERVAL := 50
 	for {
 		rf.mux.Lock()
 		if rf.lastApplied < rf.commitIdx {
-			toApply := rf.log[rf.lastApplied : rf.commitIdx+1]
+			toApply := rf.log[rf.lastApplied+1 : rf.commitIdx+1]
+
 			applyStart := rf.lastApplied + 1
 			rf.lastApplied = rf.commitIdx
 
@@ -699,17 +671,18 @@ func (rf *Raft) ApplyRoutine() {
 
 		} else {
 			rf.mux.Unlock()
+			//Apply at intervals. Prevent waste of resources
+			time.Sleep(time.Duration(INTERVAL) * time.Millisecond)
 		}
-
-		//Apply at intervals. Prevent waste of resources
-		time.Sleep(time.Duration(time.Millisecond * 150))
 	}
 }
 
+//Applies given entries to raft's Apply Channel
 func (rf *Raft) ApplyEntries(toApply []logEntry, start int) {
 
 	for i, item := range toApply {
-		cmd := ApplyCommand{Index: start + i, Command: item.Cmd}
+		cmd := ApplyCommand{Index: start + i,
+			Command: item.Cmd}
 		rf.applyCh <- cmd
 	}
 }

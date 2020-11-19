@@ -1,0 +1,11 @@
+2  19:54:25.122380 raft.go:455: logger initialized
+2  19:54:26.005540 raft.go:164: received requestVote from 0 with lastIdx 0, lastTerm -1
+2  19:54:26.162300 raft.go:329: updated log just after append [{<nil> -1} {101 1}] 
+2  19:54:26.257535 raft.go:347: leader commit idx 1 follower updated commit Idx to  1
+2  19:54:26.260610 raft.go:749: new items to apply [{101 1}]
+2  19:54:27.087381 raft.go:240: new leader restting other servers' log idx to 2
+2  19:54:27.773619 raft.go:385: promised idx 2
+2  19:54:27.789158 raft.go:574: leader routine received command 105
+2  19:54:27.790333 raft.go:694: leader updating server 1 nextIdx to 3 after sendin entries [{105 2}]
+2  19:54:27.790371 raft.go:717: leader updated commitIdx to 2
+2  19:54:27.839359 raft.go:749: new items to apply [{105 2}]

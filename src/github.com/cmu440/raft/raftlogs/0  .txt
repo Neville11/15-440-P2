@@ -1,0 +1,27 @@
+0  19:54:25.118415 raft.go:455: logger initialized
+0  19:54:26.005987 raft.go:240: new leader restting other servers' log idx to 1
+0  19:54:26.131578 raft.go:385: promised idx 1
+0  19:54:26.159052 raft.go:574: leader routine received command 101
+0  19:54:26.162780 raft.go:694: leader updating server 1 nextIdx to 2 after sendin entries [{101 1}]
+0  19:54:26.162875 raft.go:717: leader updated commitIdx to 1
+0  19:54:26.162981 raft.go:694: leader updating server 2 nextIdx to 2 after sendin entries [{101 1}]
+0  19:54:26.211079 raft.go:749: new items to apply [{101 1}]
+0  19:54:26.268883 raft.go:385: promised idx 2
+0  19:54:26.268965 raft.go:385: promised idx 3
+0  19:54:26.268999 raft.go:385: promised idx 4
+0  19:54:26.315767 raft.go:574: leader routine received command 102
+0  19:54:26.315991 raft.go:574: leader routine received command 103
+0  19:54:26.316254 raft.go:574: leader routine received command 104
+0  19:54:27.862202 raft.go:385: promised idx 5
+0  19:54:27.889888 raft.go:574: leader routine received command 106
+0  19:54:28.619894 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:29.549561 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:30.401173 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:31.229446 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:32.122776 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:32.937221 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:33.818053 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:34.762328 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:35.595297 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:36.483445 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
+0  19:54:37.517717 raft.go:164: received requestVote from 1 with lastIdx 2, lastTerm 2
